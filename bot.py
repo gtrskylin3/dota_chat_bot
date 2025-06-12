@@ -1,26 +1,41 @@
 import random
-import os, urllib, asyncio, requests
+import os
 import urllib.parse
+import asyncio
+import requests
+import logging
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command, CommandStart
-from dota_heroes import HEROES
 from dotenv import load_dotenv, find_dotenv
+from functools import lru_cache
+from dota_heroes import HEROES
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv(find_dotenv())
 
 bot = Bot(token=os.getenv('DOTA2BOT_TOKEN'))
 dp = Dispatcher()
 
+# Популярные герои для быстрого выбора
+POPULAR_HEROES = ["Pudge", "Invoker", "Sniper", "Lina", "Shadow Fiend"]
 
-class HeroState(StatesGroup):
-    waiting_for_hero = State()
-    chatting_with_hero = State()
+DESIRED_CATEGORIES = [
+    "Появление", "Передвижение", "Атака", "Убийство", "Смерть", "Покупка предмета",
+    "Добивание", "Воскрешение", "Встреча с союзником", "Встреча с врагом", "Смех",
+    "Благодарность", "Провокация", "Начало боя", "Победа", "Поражение"
+]
 
-async def get_random_quote(hero_name: str) -> str:
+# Кэширование реплик для оптимизации
+@lru_cache(maxsize=100)
+def get_cached_quotes(hero_name: str) -> tuple:
     try:
         hero_name_url = urllib.parse.quote(hero_name.replace(" ", "_"))
         url = f"https://dota2.fandom.com/ru/wiki/{hero_name_url}/Реплики"
@@ -30,63 +45,153 @@ async def get_random_quote(hero_name: str) -> str:
         soup = BeautifulSoup(response.text, 'html.parser')
         quotes = soup.select('div.mw-parser-output ul li')
         if not quotes:
-            return "Реплики для этого героя не найдены."
-        
-        # Фильтруем только текстовые реплики, исключая пустые или системные
+            return ("Реплики для этого героя не найдены.",)
+
         valid_quotes = []
         for quote in quotes:
-            # Удаляем тег <span> и его содержимое
             for span in quote.find_all('span'):
-                span.decompose()  # Удаляет тег <span> и его содержимое
+                span.decompose()
             text = quote.get_text(strip=True)
-            if text:  # Проверяем, что текст не пустой
+            if text:
                 valid_quotes.append(text)
-                
-        if not valid_quotes:
-            return "Реплики для этого героя не найдены."
-        
-        # Выбираем случайную реплику
-        return random.choice(valid_quotes)
-    except requests.RequestException:
-        return "Ошибка при загрузке страницы с репликами."
-    except Exception:
-        return "Произошла ошибка при обработке реплик."
+
+        return tuple(valid_quotes) if valid_quotes else ("Реплики для этого героя не найдены.",)
+    except requests.RequestException as e:
+        logger.error(f"Ошибка при загрузке страницы для {hero_name}: {e}")
+        return ("Ошибка при загрузке страницы с репликами.",)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке реплик для {hero_name}: {e}")
+        return ("Произошла ошибка при обработке реплик.",)
+
+async def get_random_quote(hero_name: str) -> str:
+    quotes = get_cached_quotes(hero_name)
+    return random.choice(quotes) if len(quotes) > 1 or quotes[0].startswith("Реплики") else quotes[0]
+
+# Создание клавиатуры
+def get_hero_keyboard():
+    keyboard = ReplyKeyboardBuilder()
+    for hero in POPULAR_HEROES:
+        keyboard.button(text=hero)
+    keyboard.button(text="Список всех героев")
+    keyboard.button(text="Случайная реплика")
+    keyboard.adjust(5)
+    return keyboard.as_markup(resize_keyboard=True, one_time_keyboard=True)
+
+def get_control_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="/changehero")],
+                                              [KeyboardButton(text="/info")], 
+                                              [KeyboardButton(text="/stop")]], 
+                                              resize_keyboard=True)
+    return keyboard
+
+class HeroState(StatesGroup):
+    waiting_for_hero = State()
+    chatting_with_hero = State()
 
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
-    await message.answer("Привет с каким героем из доты вы хотите пообщаться?")
+    await message.answer(
+        "👋 Привет! Я бот, который поможет тебе пообщаться с героями Dota 2! "
+        "Выбери героя или используй команду /random для случайной реплики.",
+        parse_mode="Markdown",
+        reply_markup=get_hero_keyboard()
+    )
     await state.set_state(HeroState.waiting_for_hero)
+
+@dp.message(Command("random"))
+async def random_quote(message: Message):
+    hero_name = random.choice(HEROES)
+    quote = await get_random_quote(hero_name)
+    await message.answer(f"*{hero_name}*: {quote}", parse_mode="Markdown")
+
+@dp.message(Command("changehero"))
+async def change_hero(message: Message, state: FSMContext):
+    await message.answer(
+        "Выбери нового героя:",
+        parse_mode="Markdown",
+        reply_markup=get_hero_keyboard()
+    )
+    await state.set_state(HeroState.waiting_for_hero)
+
+@dp.message(Command("info"))
+async def hero_info(message: Message, state: FSMContext):
+    user_data = await state.get_data()
+    hero_name = user_data.get('hero')
+    if not hero_name:
+        await message.answer("Сначала выбери героя с помощью /start или /changehero!")
+        return
     
+    hero_name_url = urllib.parse.quote(hero_name.replace(" ", "_"))
+    url = f"https://dota2.fandom.com/ru/wiki/{hero_name_url}"
+    await message.answer(
+        f"📖 Подробная информация о *{hero_name}*: [перейти на страницу героя]({url})",
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
+
+@dp.message(Command("stop"))
+async def stop_chat(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Чат с героем завершен. Начни заново с /start!",
+        parse_mode="Markdown",
+        reply_markup=None
+    )
+
+@dp.message(HeroState.waiting_for_hero, F.text == "Список всех героев")
+async def show_all_heroes(message: Message, state: FSMContext):
+    heroes_list = "\n".join(HEROES)
+    await message.answer(
+        f"📜 Список всех героев Dota 2:\n{heroes_list}\n\nВыбери героя или напиши его имя:",
+        parse_mode="Markdown",
+        reply_markup=get_hero_keyboard()
+    )
 
 @dp.message(HeroState.waiting_for_hero)
 async def process_hero_name(message: Message, state: FSMContext):
     hero_name = message.text.strip().title()
     if hero_name not in HEROES:
-        await message.answer("Такого героя нет в Dota 2. Попробуй еще раз!")
+        await message.answer(
+            "❌ Такого героя нет в Dota 2. Попробуй еще раз или выбери из списка!",
+            parse_mode="Markdown",
+            reply_markup=get_hero_keyboard()
+        )
         return
 
     await state.update_data(hero=hero_name)
     await state.set_state(HeroState.chatting_with_hero)
-    await message.answer(f"Ты выбрал {hero_name}! Теперь пиши что угодно, и {hero_name} ответит.")
+    await message.answer(
+        f"🎮 Ты выбрал *{hero_name}*! Пиши что угодно, и {hero_name} ответит.\n"
+        f"Команды: /changehero, /info, /stop",
+        parse_mode="Markdown",
+        reply_markup=get_control_keyboard()
+    )
 
 @dp.message(HeroState.chatting_with_hero, F.text)
-async def send_hero_audio(message: Message, state: FSMContext):
-    # Получаем сохраненного героя
+async def send_hero_quote(message: Message, state: FSMContext):
     user_data = await state.get_data()
     hero_name = user_data.get('hero')
     
     if not hero_name:
-        await message.answer("Сначала выбери героя с помощью /start!")
+        await message.answer(
+            "❌ Сначала выбери героя с помощью /start или /changehero!",
+            parse_mode="Markdown",
+            reply_markup=get_hero_keyboard()
+        )
         await state.set_state(HeroState.waiting_for_hero)
         return
     
     quote = await get_random_quote(hero_name)
-    await message.answer(f"{hero_name}: {quote}")
+    await message.answer(
+        f"*{hero_name}*: {quote}",
+        parse_mode="Markdown",
+        reply_markup=get_control_keyboard()
+    )
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
+    await bot.delete_my_commands()
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
     asyncio.run(main())
-
