@@ -4,6 +4,7 @@ import urllib.parse
 import asyncio
 import requests
 import logging
+import re
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
@@ -34,34 +35,52 @@ DESIRED_CATEGORIES = [
 ]
 
 # Кэширование реплик для оптимизации
+# Регулярное выражение для фильтрации звуков
+SOUND_PATTERN = re.compile(r'^[УХЫАМРКФНТ]{1,3}[!]$', re.IGNORECASE)
+
 @lru_cache(maxsize=100)
 def get_cached_quotes(hero_name: str) -> tuple:
     try:
-        hero_name_url = urllib.parse.quote(hero_name.replace(" ", "_"))
+        hero_name_url = hero_name.replace(" ", "_")
         url = f"https://dota2.fandom.com/ru/wiki/{hero_name_url}/Реплики"
         response = requests.get(url)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
-        quotes = soup.select('div.mw-parser-output ul li')
-        if not quotes:
+        content = soup.select_one('div.mw-parser-output')
+        if not content:
             return ("Реплики для этого героя не найдены.",)
 
         valid_quotes = []
-        for quote in quotes:
-            for span in quote.find_all('span'):
-                span.decompose()
-            text = quote.get_text(strip=True)
-            if text:
-                valid_quotes.append(text)
+        current_category = None
+
+        # Проходим по всем элементам в контенте
+        for element in content.find_all(['h2', 'h3', 'ul'], recursive=False):
+            if element.name in ['h2', 'h3']:
+                # Обновляем категорию
+                category_span = element.find('span', class_='mw-headline')
+                current_category = category_span.get_text(strip=True) if category_span else None
+            elif element.name == 'ul' and current_category:
+                # Проверяем, входит ли категория в желаемые
+                if current_category in DESIRED_CATEGORIES:
+                    quotes = element.find_all('li', recursive=False)
+                    for quote in quotes:
+                        # Удаляем элементы <span> (аудио и другие)
+                        for span in quote.find_all('span'):
+                            span.decompose()
+                        text = quote.get_text(strip=True)
+
+                        # Упрощенная фильтрация
+                        if not text or len(text) < 3:  # Минимальная длина уменьшена
+                            continue
+                        if SOUND_PATTERN.match(text):  # Фильтр только для явных звуков
+                            continue
+
+                        valid_quotes.append(text)
 
         return tuple(valid_quotes) if valid_quotes else ("Реплики для этого героя не найдены.",)
-    except requests.RequestException as e:
-        logger.error(f"Ошибка при загрузке страницы для {hero_name}: {e}")
-        return ("Ошибка при загрузке страницы с репликами.",)
     except Exception as e:
-        logger.error(f"Ошибка при обработке реплик для {hero_name}: {e}")
-        return ("Произошла ошибка при обработке реплик.",)
+        return (f"Ошибка: {str(e)}",)
 
 async def get_random_quote(hero_name: str) -> str:
     quotes = get_cached_quotes(hero_name)
@@ -98,7 +117,7 @@ async def start(message: Message, state: FSMContext):
     )
     await state.set_state(HeroState.waiting_for_hero)
 
-@dp.message(Command("random"))
+@dp.message(Command(commands=["random", "Случайная реплика"]))
 async def random_quote(message: Message):
     hero_name = random.choice(HEROES)
     quote = await get_random_quote(hero_name)
