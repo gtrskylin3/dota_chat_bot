@@ -16,6 +16,8 @@ from aiogram.filters import Command, CommandStart
 from dotenv import load_dotenv, find_dotenv
 from functools import lru_cache
 from dota_heroes import HEROES
+from fastapi import FastAPI
+import uvicorn
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +40,15 @@ DESIRED_CATEGORIES = [
 # Кэширование реплик для оптимизации
 # Регулярное выражение для фильтрации звуков
 SOUND_PATTERN = re.compile(r'^[УХЫАМРКФНТ]{1,3}[!]$', re.IGNORECASE)
+
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    logger.info("Получен HTTP-запрос для поддержания активности")
+    return {"status": "ok"}
+
+
 
 async def keep_alive():
     url = 'https://dota-chat-bot.onrender.com/'
@@ -224,6 +235,9 @@ async def send_hero_quote(message: Message, state: FSMContext):
     )
 
 async def main():
+    config = uvicorn.Config(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    server = uvicorn.Server(config)
+    asyncio.create_task(server.serve())
     asyncio.create_task(keep_alive())
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.delete_my_commands()
