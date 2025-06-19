@@ -4,6 +4,7 @@ import urllib.parse
 import asyncio
 import requests
 import logging
+import aiohttp
 import re
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
@@ -37,6 +38,21 @@ DESIRED_CATEGORIES = [
 # Кэширование реплик для оптимизации
 # Регулярное выражение для фильтрации звуков
 SOUND_PATTERN = re.compile(r'^[УХЫАМРКФНТ]{1,3}[!]$', re.IGNORECASE)
+
+async def keep_alive():
+    url = 'https://dota-chat-bot.onrender.com/'
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url) as response:
+                    logger.info(f"Ping: {response.status}")
+            except Exception as e:
+                logger.error(f"Ping error: {e}")
+            await asyncio.sleep(1000)
+
+
+
+
 
 @lru_cache(maxsize=100)
 def get_cached_quotes(hero_name: str) -> tuple:
@@ -208,6 +224,7 @@ async def send_hero_quote(message: Message, state: FSMContext):
     )
 
 async def main():
+    asyncio.create_task(keep_alive())
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.delete_my_commands()
     await dp.start_polling(bot)
